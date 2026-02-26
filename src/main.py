@@ -6,6 +6,7 @@ from pathlib import Path
 
 from src.agent.collector import JsonFileCollector, MessageCollector, MockCollector, PlaywrightWhatsAppCollector
 from src.agent.db import AgentDB
+from src.agent.llm_summarizer import LLMIncrementalSummarizer
 from src.agent.pipeline import WhatsAppSummaryPipeline
 from src.agent.summarizer import IncrementalSummarizer
 
@@ -31,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=300,
         help="Máximo de mensagens visíveis extraídas por execução no modo whatsapp-web.",
     )
+
+    parser.add_argument("--llm-provider", choices=["none", "ollama", "openai"], default="none")
+    parser.add_argument("--llm-model", default="")
+    parser.add_argument("--ollama-url", default="http://localhost:11434")
+    parser.add_argument("--openai-base-url", default="https://api.openai.com")
+    parser.add_argument("--openai-api-key-env", default="OPENAI_API_KEY")
 
     parser.add_argument("--output", help="Arquivo para salvar o micro-resumo gerado (ex.: out/resumo.md).")
     parser.add_argument(
