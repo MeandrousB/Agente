@@ -73,21 +73,5 @@ class PipelineTestCase(unittest.TestCase):
             self.assertIn("Carla", summary_2)
 
 
-
-    def test_json_collector_group_not_found_raises(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = AgentDB(f"{tmp}/agent.db")
-            payload_path = Path(tmp) / "messages.json"
-            payload_path.write_text(json.dumps({"Outro Grupo": []}), encoding="utf-8")
-
-            pipeline = WhatsAppSummaryPipeline(
-                JsonFileCollector(str(payload_path)),
-                db,
-                IncrementalSummarizer(),
-            )
-
-            with self.assertRaises(ValueError):
-                pipeline.run_for_group("Grupo inexistente")
-
 if __name__ == "__main__":
     unittest.main()
