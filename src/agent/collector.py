@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -48,6 +47,16 @@ class MockCollector(MessageCollector):
 
 
 class JsonFileCollector(MessageCollector):
+    """Coletor simples para dados exportados/capturados em JSON.
+
+    Formato esperado:
+    {
+      "Nome do Grupo": [
+        {"author": "...", "timestamp": "2026-01-01T10:00:00", "text": "...", "external_id": "..."}
+      ]
+    }
+    """
+
     def __init__(self, source_path: str) -> None:
         self.source_path = Path(source_path)
 
@@ -64,7 +73,12 @@ class JsonFileCollector(MessageCollector):
 
 
 class PlaywrightWhatsAppCollector(MessageCollector):
-    """Coletor WhatsApp Web com Playwright (experimental)."""
+    """Coletor WhatsApp Web com Playwright (experimental).
+
+    - Mantém sessão usando user-data-dir persistente.
+    - Primeira execução requer login manual por QR.
+    - Seletores do WhatsApp mudam ao longo do tempo; por isso são parametrizáveis.
+    """
 
     def __init__(
         self,
@@ -72,7 +86,8 @@ class PlaywrightWhatsAppCollector(MessageCollector):
         headless: bool = False,
         max_messages_visible: int = 300,
         group_search_selector: str = "div[contenteditable='true'][data-tab='3']",
-        message_row_selector: str = "div[data-pre-plain-text]",
+        message_row_selector: str = "div[role='row']",
+        author_selector: str = "[data-pre-plain-text]",
         text_selector: str = "span.selectable-text",
     ) -> None:
         self.profile_dir = Path(profile_dir)
@@ -80,6 +95,7 @@ class PlaywrightWhatsAppCollector(MessageCollector):
         self.max_messages_visible = max_messages_visible
         self.group_search_selector = group_search_selector
         self.message_row_selector = message_row_selector
+        self.author_selector = author_selector
         self.text_selector = text_selector
 
     def collect_messages(self, group_name: str, since_timestamp: datetime | None = None) -> list[dict[str, Any]]:
@@ -100,25 +116,34 @@ class PlaywrightWhatsAppCollector(MessageCollector):
             page = context.new_page()
             page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
 
-            self._open_group(page, group_name)
+            page.wait_for_timeout(5000)
+            search_box = page.locator(self.group_search_selector).first
+            search_box.click()
+            search_box.fill(group_name)
+            page.wait_for_timeout(1500)
+
+            # Tenta abrir o grupo pelo nome visível.
+            page.get_by_text(group_name, exact=False).first.click(timeout=10000)
+            page.wait_for_timeout(2000)
+
             rows = page.locator(self.message_row_selector)
             count = min(rows.count(), self.max_messages_visible)
-
             data: list[dict[str, Any]] = []
+
             for idx in range(count):
                 row = rows.nth(idx)
                 text = " ".join(row.locator(self.text_selector).all_inner_texts()).strip()
+                meta = " ".join(row.locator(self.author_selector).all_inner_texts()).strip()
                 if not text:
                     continue
 
-                meta = row.get_attribute("data-pre-plain-text") or ""
-                author, timestamp = _extract_author_and_timestamp(meta)
-                external_seed = f"{author}|{timestamp.isoformat()}|{text}|{idx}"
-                external_id = f"pw-{hashlib.sha1(external_seed.encode('utf-8')).hexdigest()[:16]}"
+                author = _extract_author_from_meta(meta)
+                timestamp = datetime.now().replace(microsecond=0).isoformat()
+                external_id = f"pw-{idx}-" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
                 data.append(
                     {
                         "author": author,
-                        "timestamp": timestamp.isoformat(),
+                        "timestamp": timestamp,
                         "text": text,
                         "external_id": external_id,
                     }
@@ -128,53 +153,15 @@ class PlaywrightWhatsAppCollector(MessageCollector):
 
         return _filter_since(data, since_timestamp)
 
-    def _open_group(self, page, group_name: str) -> None:
-        page.wait_for_timeout(4000)
-        search_box = page.locator(self.group_search_selector).first
-        search_box.click(timeout=15000)
-        search_box.fill("")
-        search_box.type(group_name, delay=40)
-        page.wait_for_timeout(1500)
 
-        escaped = group_name.replace('"', '\\"')
-        chat_candidate = page.locator(f'span[title="{escaped}"]').first
-        if chat_candidate.count() > 0:
-            chat_candidate.click(timeout=10000)
-        else:
-            page.get_by_text(group_name, exact=False).first.click(timeout=10000)
-
-        page.wait_for_timeout(1500)
-
-        header = page.locator("header span[title]").first
-        if header.count() == 0:
-            raise RuntimeError("Não foi possível abrir o grupo no WhatsApp Web.")
-
-
-def _extract_author_and_timestamp(meta_text: str) -> tuple[str, datetime]:
+def _extract_author_from_meta(meta_text: str) -> str:
     if not meta_text:
-        return "desconhecido", datetime.now().replace(microsecond=0)
-
-    # Exemplo: "[10:18, 22/02/2026] Nome: "
-    match = re.match(r"^\[(?P<hour>\d{1,2}:\d{2})(?:,\s*(?P<date>\d{1,2}/\d{1,2}/\d{2,4}))?\]\s*(?P<author>.*?):\s*$", meta_text)
-    if not match:
-        return "desconhecido", datetime.now().replace(microsecond=0)
-
-    author = (match.group("author") or "desconhecido").strip() or "desconhecido"
-    hour = match.group("hour")
-    date_part = match.group("date")
-
-    if date_part:
-        day, month, year = [int(x) for x in date_part.split("/")]
-        if year < 100:
-            year += 2000
-        hour_i, minute_i = [int(x) for x in hour.split(":")]
-        timestamp = datetime(year, month, day, hour_i, minute_i)
-    else:
-        today = datetime.now().date()
-        hour_i, minute_i = [int(x) for x in hour.split(":")]
-        timestamp = datetime(today.year, today.month, today.day, hour_i, minute_i)
-
-    return author, timestamp
+        return "desconhecido"
+    if "]" in meta_text:
+        right = meta_text.split("]", maxsplit=1)[1].strip()
+        if ":" in right:
+            return right.split(":", maxsplit=1)[0].strip() or "desconhecido"
+    return "desconhecido"
 
 
 def _filter_since(messages: list[dict[str, Any]], since_timestamp: datetime | None) -> list[dict[str, Any]]:
