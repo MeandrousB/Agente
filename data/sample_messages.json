@@ -1,0 +1,22 @@
+{
+  "Projeto X": [
+    {
+      "author": "Ana",
+      "timestamp": "2026-01-05T09:00:00",
+      "text": "Decisão: manter deploy em janela noturna.",
+      "external_id": "px-1"
+    },
+    {
+      "author": "Bruno",
+      "timestamp": "2026-01-05T09:10:00",
+      "text": "Pendente: aprovar orçamento de infraestrutura.",
+      "external_id": "px-2"
+    },
+    {
+      "author": "Carla",
+      "timestamp": "2026-01-05T09:20:00",
+      "text": "Risco: dependência do fornecedor X.",
+      "external_id": "px-3"
+    }
+  ]
+}
