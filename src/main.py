@@ -62,30 +62,15 @@ def build_collector(args: argparse.Namespace) -> MessageCollector:
     )
 
 
-def build_summarizer(args: argparse.Namespace):
-    if args.llm_provider == "none":
-        return IncrementalSummarizer()
-    if not args.llm_model:
-        raise ValueError("Com --llm-provider ollama/openai, informe --llm-model.")
-    return LLMIncrementalSummarizer(
-        provider=args.llm_provider,
-        model=args.llm_model,
-        ollama_url=args.ollama_url,
-        openai_base_url=args.openai_base_url,
-        openai_api_key_env=args.openai_api_key_env,
-    )
-
-
 def main() -> None:
     args = build_parser().parse_args()
     collector = build_collector(args)
-    summarizer = build_summarizer(args)
 
     db = AgentDB(args.db)
     pipeline = WhatsAppSummaryPipeline(
         collector=collector,
         db=db,
-        summarizer=summarizer,
+        summarizer=IncrementalSummarizer(),
     )
     summary = pipeline.run_for_group(args.group)
     print(summary)
