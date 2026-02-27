@@ -6,6 +6,8 @@ from src.agent.collector import JsonFileCollector, MockCollector, PlaywrightWhat
 from src.agent.llm_summarizer import LLMIncrementalSummarizer
 from src.agent.summarizer import IncrementalSummarizer
 from src.main import build_collector, build_parser, build_summarizer
+from src.main import build_collector, build_parser
+from src.agent.collector import JsonFileCollector, MockCollector, PlaywrightWhatsAppCollector
 
 
 class MainTestCase(unittest.TestCase):

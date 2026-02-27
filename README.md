@@ -87,6 +87,10 @@ python -m src.main --source whatsapp-web --group "Projeto X" --db agent.db --wa-
 Se o LLM falhar por rede/chave/configuração, o sistema usa fallback heurístico automaticamente.
 
 ### 4) Modo mock (teste rápido)
+- Este coletor é um ponto de partida e pode exigir ajustes.
+- Use `--wa-headless` se quiser rodar sem janela.
+
+### 3) Modo mock (teste rápido)
 
 ```bash
 python -m src.main --source mock --group "Projeto X" --db agent.db --show-state
