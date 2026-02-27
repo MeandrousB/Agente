@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 
 from src.agent.collector import JsonFileCollector, MessageCollector, MockCollector
-from src.agent.collector import JsonFileCollector, MockCollector
 from src.agent.db import AgentDB
 from src.agent.pipeline import WhatsAppSummaryPipeline
 from src.agent.summarizer import IncrementalSummarizer

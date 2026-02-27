@@ -72,7 +72,6 @@ class JsonFileCollector(MessageCollector):
                 f"Grupo '{group_name}' não encontrado no JSON. Grupos disponíveis: {available or '(nenhum)'}"
             )
 
-        group_messages = payload[group_name]
         group_messages = payload.get(group_name, [])
         if not isinstance(group_messages, list):
             raise ValueError(f"Grupo '{group_name}' deve conter uma lista de mensagens no JSON.")
@@ -81,7 +80,6 @@ class JsonFileCollector(MessageCollector):
 
 
 class PlaywrightWhatsAppCollector(MessageCollector):
-    """Coletor WhatsApp Web com Playwright (experimental)."""
     """Coletor WhatsApp Web com Playwright (experimental).
 
     - Mantém sessão usando user-data-dir persistente.
@@ -95,8 +93,6 @@ class PlaywrightWhatsAppCollector(MessageCollector):
         headless: bool = False,
         max_messages_visible: int = 300,
         group_search_selector: str = "div[contenteditable='true'][data-tab='3']",
-        message_row_selector: str = "div[data-pre-plain-text], div.copyable-text[data-pre-plain-text], div.message-in, div.message-out",
-        text_selector: str = "span.selectable-text, span.copyable-text",
         message_row_selector: str = "div[role='row']",
         author_selector: str = "[data-pre-plain-text]",
         text_selector: str = "span.selectable-text",
@@ -128,6 +124,7 @@ class PlaywrightWhatsAppCollector(MessageCollector):
             page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
 
             self._open_group(page, group_name)
+
             rows = page.locator(self.message_row_selector)
             count = min(rows.count(), self.max_messages_visible)
 
@@ -135,6 +132,9 @@ class PlaywrightWhatsAppCollector(MessageCollector):
             for idx in range(count):
                 row = rows.nth(idx)
                 text = " ".join(row.locator(self.text_selector).all_inner_texts()).strip()
+                if not text:
+                    # Fallback: seletor mais específico para texto de mensagem
+                    text = " ".join(row.locator("span.selectable-text.copyable-text").all_inner_texts()).strip()
                 if not text:
                     text = (row.inner_text(timeout=1000) or "").strip()
                 if not text:
@@ -150,34 +150,6 @@ class PlaywrightWhatsAppCollector(MessageCollector):
                     {
                         "author": author,
                         "timestamp": timestamp.isoformat(),
-            page.wait_for_timeout(5000)
-            search_box = page.locator(self.group_search_selector).first
-            search_box.click()
-            search_box.fill(group_name)
-            page.wait_for_timeout(1500)
-
-            # Tenta abrir o grupo pelo nome visível.
-            page.get_by_text(group_name, exact=False).first.click(timeout=10000)
-            page.wait_for_timeout(2000)
-
-            rows = page.locator(self.message_row_selector)
-            count = min(rows.count(), self.max_messages_visible)
-            data: list[dict[str, Any]] = []
-
-            for idx in range(count):
-                row = rows.nth(idx)
-                text = " ".join(row.locator(self.text_selector).all_inner_texts()).strip()
-                meta = " ".join(row.locator(self.author_selector).all_inner_texts()).strip()
-                if not text:
-                    continue
-
-                author = _extract_author_from_meta(meta)
-                timestamp = datetime.now().replace(microsecond=0).isoformat()
-                external_id = f"pw-{idx}-" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
-                data.append(
-                    {
-                        "author": author,
-                        "timestamp": timestamp,
                         "text": text,
                         "external_id": external_id,
                     }
@@ -192,7 +164,7 @@ class PlaywrightWhatsAppCollector(MessageCollector):
 
         return _filter_since(data, since_timestamp)
 
-    def _open_group(self, page, group_name: str) -> None:
+    def _open_group(self, page: Any, group_name: str) -> None:
         page.wait_for_timeout(4000)
 
         search_box = page.locator(self.group_search_selector).first
@@ -203,7 +175,11 @@ class PlaywrightWhatsAppCollector(MessageCollector):
 
         search_box.click(timeout=15000)
         search_box.fill("")
-        search_box.type(group_name, delay=40)
+        # press_sequentially é a API moderna; type() foi depreciado no Playwright >= 1.40
+        try:
+            search_box.press_sequentially(group_name, delay=40)
+        except AttributeError:
+            search_box.type(group_name, delay=40)  # type: ignore[attr-defined]
         page.wait_for_timeout(1800)
 
         escaped = group_name.replace('"', '\\"')
@@ -231,7 +207,10 @@ def extract_author_and_timestamp(meta_text: str) -> tuple[str, datetime]:
     if not meta_text:
         return "desconhecido", datetime.now().replace(microsecond=0)
 
-    match = re.match(r"^\[(?P<hour>\d{1,2}:\d{2})(?:,\s*(?P<date>\d{1,2}/\d{1,2}/\d{2,4}))?\]\s*(?P<author>.*?):\s*$", meta_text)
+    match = re.match(
+        r"^\[(?P<hour>\d{1,2}:\d{2})(?:,\s*(?P<date>\d{1,2}/\d{1,2}/\d{2,4}))?\]\s*(?P<author>.*?):\s*$",
+        meta_text,
+    )
     if not match:
         return "desconhecido", datetime.now().replace(microsecond=0)
 
@@ -254,7 +233,6 @@ def extract_author_and_timestamp(meta_text: str) -> tuple[str, datetime]:
 
 
 _extract_author_and_timestamp = extract_author_and_timestamp
-        return _filter_since(data, since_timestamp)
 
 
 def _extract_author_from_meta(meta_text: str) -> str:
