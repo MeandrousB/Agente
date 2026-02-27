@@ -133,6 +133,9 @@ class PlaywrightWhatsAppCollector(MessageCollector):
                 row = rows.nth(idx)
                 text = " ".join(row.locator(self.text_selector).all_inner_texts()).strip()
                 if not text:
+                    # Fallback: seletor mais específico para texto de mensagem
+                    text = " ".join(row.locator("span.selectable-text.copyable-text").all_inner_texts()).strip()
+                if not text:
                     text = (row.inner_text(timeout=1000) or "").strip()
                 if not text:
                     continue
@@ -172,7 +175,11 @@ class PlaywrightWhatsAppCollector(MessageCollector):
 
         search_box.click(timeout=15000)
         search_box.fill("")
-        search_box.type(group_name, delay=40)
+        # press_sequentially é a API moderna; type() foi depreciado no Playwright >= 1.40
+        try:
+            search_box.press_sequentially(group_name, delay=40)
+        except AttributeError:
+            search_box.type(group_name, delay=40)  # type: ignore[attr-defined]
         page.wait_for_timeout(1800)
 
         escaped = group_name.replace('"', '\\"')
