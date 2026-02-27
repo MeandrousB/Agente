@@ -12,10 +12,12 @@ Implementação funcional para uso imediato com 3 fontes de coleta:
 2. Persistência SQLite com checkpoint incremental por `last_message_ts`.
 3. Micro-resumo + estado incremental (`decisions`, `pending`, `risks`, `current_status`).
 4. CLI com saída em arquivo e inspeção de estado.
+5. Resumo opcional por LLM (`ollama` ou `openai`) com fallback automático.
 
 ## Estrutura
 
 - `src/agent/collector.py`: `MessageCollector`, `MockCollector`, `JsonFileCollector`, `PlaywrightWhatsAppCollector`
+- `src/agent/llm_summarizer.py`: integração com Ollama/OpenAI-compatible
 - `src/agent/normalizer.py`: normalização e filtro de ruído
 - `src/agent/db.py`: SQLite (mensagens, estado, resumos)
 - `src/agent/summarizer.py`: resumidor incremental heurístico
@@ -32,6 +34,8 @@ python -m src.main --source json --source-json data/sample_messages.json --group
 ```
 
 Rode novamente com o mesmo `--db`: ele só processa mensagens novas.
+
+No modo `--source json`, o `--group` precisa existir como chave no arquivo JSON (o exemplo contém apenas `Projeto X`).
 
 ### 2) Modo WhatsApp Web (experimental)
 
@@ -50,6 +54,39 @@ python -m src.main --source whatsapp-web --group "Projeto X" --db agent.db --wa-
 
 Observações:
 - O WhatsApp Web muda seletores/DOM com frequência.
+- Este coletor agora tenta abrir o chat por `span[title="<nome do grupo>"]` e valida se o header carregou.
+- Use o nome do grupo exatamente como aparece na barra lateral (incluindo acentos/parênteses).
+- Use `--wa-headless` se quiser rodar sem janela.
+
+Dica para nomes com caracteres especiais:
+- Se o grupo tiver muitos caracteres especiais, teste copiar/colar o nome direto do WhatsApp para o `--group`.
+
+### 3) Conectar LLM (grupo real)
+
+#### Ollama local (mais barato)
+
+Suba o Ollama com um modelo local (ex.: `qwen2.5:7b`) e rode:
+
+```bash
+python -m src.main --source whatsapp-web --group "Projeto X" --db agent.db --wa-profile-dir .wa_profile --llm-provider ollama --llm-model qwen2.5:7b --show-state --output out/resumo.md
+```
+
+Opcional: mudar URL do Ollama:
+
+```bash
+python -m src.main ... --llm-provider ollama --llm-model qwen2.5:7b --ollama-url http://localhost:11434
+```
+
+#### OpenAI-compatible
+
+```bash
+export OPENAI_API_KEY="sua_chave"
+python -m src.main --source whatsapp-web --group "Projeto X" --db agent.db --wa-profile-dir .wa_profile --llm-provider openai --llm-model gpt-4o-mini --show-state --output out/resumo.md
+```
+
+Se o LLM falhar por rede/chave/configuração, o sistema usa fallback heurístico automaticamente.
+
+### 4) Modo mock (teste rápido)
 - Este coletor é um ponto de partida e pode exigir ajustes.
 - Use `--wa-headless` se quiser rodar sem janela.
 
@@ -79,3 +116,31 @@ python -m src.main --source mock --group "Projeto X" --db agent.db --show-state
 ```bash
 python -m unittest discover -s tests -p 'test_*.py'
 ```
+
+## Troubleshooting rápido
+
+Se aparecer `bash: syntax error near unexpected token '('`, normalmente foi copiado algum texto extra junto com o comando (por exemplo comentários com parênteses).
+
+Use **somente** esta linha:
+
+```bash
+python -m src.main --source json --source-json data/sample_messages.json --group "Projeto X" --db agent.db --show-state --output out/resumo.md
+```
+
+Dicas:
+- Não copie o símbolo `$` do prompt.
+- Não inclua observações entre parênteses na mesma linha do comando.
+- Se preferir, teste primeiro sem espaço no nome do grupo: `--group ProjetoX`.
+
+
+### Diagnóstico rápido (WhatsApp Web)
+
+Se voltar `Sem novas mensagens para resumir.` na primeira execução com `--source whatsapp-web`, normalmente o chat abriu mas o DOM não bateu com os seletores.
+
+Tente:
+
+```bash
+python -m src.main --source whatsapp-web --group "SEU_GRUPO_EXATO" --db agent.db --wa-profile-dir .wa_profile --show-state
+```
+
+Se nenhuma mensagem for capturada na primeira execução, o coletor retorna erro explícito para evitar falso "vazio" e facilitar ajuste de seletor.

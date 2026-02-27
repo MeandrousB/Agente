@@ -15,6 +15,8 @@ class WhatsAppSummaryPipeline:
     def run_for_group(self, group_name: str) -> str:
         state, last_message_ts = self.db.load_state(group_name)
         raw_messages = self.collector.collect_messages(group_name=group_name, since_timestamp=last_message_ts)
+        if last_message_ts is None and not raw_messages:
+            raise RuntimeError("Nenhuma mensagem foi coletada na primeira execução para este grupo.")
 
         normalized = [
             msg

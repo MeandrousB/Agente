@@ -5,10 +5,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from src.agent.collector import JsonFileCollector, MessageCollector, MockCollector
 from src.agent.collector import JsonFileCollector, MockCollector
 from src.agent.db import AgentDB
 from src.agent.pipeline import WhatsAppSummaryPipeline
 from src.agent.summarizer import IncrementalSummarizer
+
+
+class EmptyCollector(MessageCollector):
+    def collect_messages(self, group_name: str, since_timestamp=None):
+        return []
 
 
 class PipelineTestCase(unittest.TestCase):
@@ -72,6 +78,29 @@ class PipelineTestCase(unittest.TestCase):
             self.assertIn("Riscos: 1", summary_2)
             self.assertIn("Carla", summary_2)
 
+
+    def test_first_run_with_no_collected_messages_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = AgentDB(f"{tmp}/agent.db")
+            pipeline = WhatsAppSummaryPipeline(EmptyCollector(), db, IncrementalSummarizer())
+            with self.assertRaises(RuntimeError):
+                pipeline.run_for_group("Grupo Vazio")
+
+
+    def test_json_collector_group_not_found_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = AgentDB(f"{tmp}/agent.db")
+            payload_path = Path(tmp) / "messages.json"
+            payload_path.write_text(json.dumps({"Outro Grupo": []}), encoding="utf-8")
+
+            pipeline = WhatsAppSummaryPipeline(
+                JsonFileCollector(str(payload_path)),
+                db,
+                IncrementalSummarizer(),
+            )
+
+            with self.assertRaises(ValueError):
+                pipeline.run_for_group("Grupo inexistente")
 
 if __name__ == "__main__":
     unittest.main()
