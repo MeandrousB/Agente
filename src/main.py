@@ -80,9 +80,6 @@ def main() -> None:
     args = build_parser().parse_args()
     collector = build_collector(args)
     summarizer = build_summarizer(args)
-def main() -> None:
-    args = build_parser().parse_args()
-    collector = build_collector(args)
 
     db = AgentDB(args.db)
     pipeline = WhatsAppSummaryPipeline(
@@ -96,9 +93,6 @@ def main() -> None:
         raise SystemExit(f"Erro de configuração/entrada: {exc}")
     except RuntimeError as exc:
         raise SystemExit(f"Erro de coleta/processamento: {exc}")
-        summarizer=IncrementalSummarizer(),
-    )
-    summary = pipeline.run_for_group(args.group)
     print(summary)
 
     if args.output:
