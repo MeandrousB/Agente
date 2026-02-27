@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--llm-provider", choices=["none", "ollama", "openai"], default="none")
     parser.add_argument("--llm-model", default="")
+    parser.add_argument("--llm-timeout", type=int, default=120, help="Timeout em segundos para chamadas ao LLM (padrão: 120).")
     parser.add_argument("--ollama-url", default="http://localhost:11434")
     parser.add_argument("--openai-base-url", default="https://api.openai.com")
     parser.add_argument("--openai-api-key-env", default="OPENAI_API_KEY")
@@ -73,6 +74,7 @@ def build_summarizer(args: argparse.Namespace):
         ollama_url=args.ollama_url,
         openai_base_url=args.openai_base_url,
         openai_api_key_env=args.openai_api_key_env,
+        timeout_s=args.llm_timeout,
     )
 
 
