@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 from src.agent.collector import JsonFileCollector, MessageCollector, MockCollector, PlaywrightWhatsAppCollector
@@ -41,7 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--openai-base-url", default="https://api.openai.com")
     parser.add_argument("--openai-api-key-env", default="OPENAI_API_KEY")
 
-    parser.add_argument("--doctor", action="store_true", help="Mostra diagnóstico rápido do ambiente e sai.")
     parser.add_argument("--output", help="Arquivo para salvar o micro-resumo gerado (ex.: out/resumo.md).")
     parser.add_argument(
         "--show-state",
@@ -56,7 +53,7 @@ def build_collector(args: argparse.Namespace) -> MessageCollector:
         return MockCollector()
     if args.source == "json":
         if not args.source_json:
-            raise ValueError("Com --source json, informe --source-json <arquivo>.")
+            raise ValueError("Com --source json, informe --source-json <arquivo>. ")
         return JsonFileCollector(args.source_json)
     return PlaywrightWhatsAppCollector(
         profile_dir=args.wa_profile_dir,
@@ -79,32 +76,13 @@ def build_summarizer(args: argparse.Namespace):
     )
 
 
-def run_doctor(args: argparse.Namespace) -> None:
-    print("Diagnóstico do ambiente:")
-    print(json.dumps(
-        {
-            "cwd": str(Path.cwd()),
-            "source": args.source,
-            "group": args.group,
-            "db": args.db,
-            "python_executable": os.sys.executable,
-            "openai_key_set": bool(os.getenv(args.openai_api_key_env)),
-            "source_json_exists": bool(args.source_json and Path(args.source_json).exists()),
-            "wa_profile_dir": args.wa_profile_dir,
-        },
-        ensure_ascii=False,
-        indent=2,
-    ))
-
-
 def main() -> None:
     args = build_parser().parse_args()
-    if args.doctor:
-        run_doctor(args)
-        return
-
     collector = build_collector(args)
     summarizer = build_summarizer(args)
+def main() -> None:
+    args = build_parser().parse_args()
+    collector = build_collector(args)
 
     db = AgentDB(args.db)
     pipeline = WhatsAppSummaryPipeline(
@@ -118,6 +96,9 @@ def main() -> None:
         raise SystemExit(f"Erro de configuração/entrada: {exc}")
     except RuntimeError as exc:
         raise SystemExit(f"Erro de coleta/processamento: {exc}")
+        summarizer=IncrementalSummarizer(),
+    )
+    summary = pipeline.run_for_group(args.group)
     print(summary)
 
     if args.output:

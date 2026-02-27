@@ -87,6 +87,10 @@ python -m src.main --source whatsapp-web --group "Projeto X" --db agent.db --wa-
 Se o LLM falhar por rede/chave/configuração, o sistema usa fallback heurístico automaticamente.
 
 ### 4) Modo mock (teste rápido)
+- Este coletor é um ponto de partida e pode exigir ajustes.
+- Use `--wa-headless` se quiser rodar sem janela.
+
+### 3) Modo mock (teste rápido)
 
 ```bash
 python -m src.main --source mock --group "Projeto X" --db agent.db --show-state
@@ -140,15 +144,3 @@ python -m src.main --source whatsapp-web --group "SEU_GRUPO_EXATO" --db agent.db
 ```
 
 Se nenhuma mensagem for capturada na primeira execução, o coletor retorna erro explícito para evitar falso "vazio" e facilitar ajuste de seletor.
-
-
-### Diagnóstico de ambiente
-
-Se aparecer erro de sintaxe ao executar `src.main` no seu PC, rode:
-
-```bash
-python -m py_compile src/main.py
-python -m src.main --doctor
-```
-
-Isso valida o arquivo e imprime configuração básica (source, db, grupo, chave OpenAI, etc.).

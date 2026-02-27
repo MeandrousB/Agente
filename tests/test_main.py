@@ -6,6 +6,8 @@ from src.agent.collector import JsonFileCollector, MockCollector, PlaywrightWhat
 from src.agent.llm_summarizer import LLMIncrementalSummarizer
 from src.agent.summarizer import IncrementalSummarizer
 from src.main import build_collector, build_parser, build_summarizer
+from src.main import build_collector, build_parser
+from src.agent.collector import JsonFileCollector, MockCollector, PlaywrightWhatsAppCollector
 
 
 class MainTestCase(unittest.TestCase):
@@ -43,10 +45,6 @@ class MainTestCase(unittest.TestCase):
         args = build_parser().parse_args(["--llm-provider", "ollama", "--llm-model", "qwen2.5:7b"])
         summarizer = build_summarizer(args)
         self.assertIsInstance(summarizer, LLMIncrementalSummarizer)
-
-    def test_doctor_flag_parses(self) -> None:
-        args = build_parser().parse_args(["--doctor"])
-        self.assertTrue(args.doctor)
 
 
 if __name__ == "__main__":
