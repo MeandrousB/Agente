@@ -125,46 +125,64 @@ class PlaywrightWhatsAppCollector(MessageCollector):
 
             self._open_group(page, group_name)
 
-            rows = page.locator(self.message_row_selector)
-            count = min(rows.count(), self.max_messages_visible)
-
-            data: list[dict[str, Any]] = []
-            for idx in range(count):
-                row = rows.nth(idx)
-                text = " ".join(row.locator(self.text_selector).all_inner_texts()).strip()
-                if not text:
-                    # Fallback: seletor mais específico para texto de mensagem
-                    text = " ".join(row.locator("span.selectable-text.copyable-text").all_inner_texts()).strip()
-                if not text:
-                    text = (row.inner_text(timeout=1000) or "").strip()
-                if not text:
-                    continue
-
-                meta = row.get_attribute("data-pre-plain-text")
-                if not meta:
-                    meta = row.locator("[data-pre-plain-text]").first.get_attribute("data-pre-plain-text")
-                author, timestamp = extract_author_and_timestamp(meta or "")
-                external_seed = f"{author}|{timestamp.isoformat()}|{text}|{idx}"
-                external_id = f"pw-{hashlib.sha1(external_seed.encode('utf-8')).hexdigest()[:16]}"
-                data.append(
-                    {
-                        "author": author,
-                        "timestamp": timestamp.isoformat(),
-                        "text": text,
-                        "external_id": external_id,
+            # Extrai todas as mensagens visíveis de uma só vez via JS.
+            # Isso evita timeouts de seletores individuais (WhatsApp tem
+            # mensagens de sistema / separadores sem [data-pre-plain-text])
+            # e é imune à re-renderização virtual durante iteração Python.
+            raw_items: list[dict] = page.evaluate(
+                """(maxItems) => {
+                    const rows = document.querySelectorAll("div[role='row']");
+                    const results = [];
+                    for (const row of rows) {
+                        if (results.length >= maxItems) break;
+                        // meta: preferir atributo direto na row; fallback em filho
+                        let meta = row.getAttribute("data-pre-plain-text");
+                        if (!meta) {
+                            const el = row.querySelector("[data-pre-plain-text]");
+                            meta = el ? el.getAttribute("data-pre-plain-text") : null;
+                        }
+                        // texto: copyable-text > selectable-text > innerText
+                        let spans = row.querySelectorAll("span.selectable-text.copyable-text");
+                        if (!spans.length) spans = row.querySelectorAll("span.selectable-text");
+                        const text = spans.length
+                            ? Array.from(spans).map(s => s.innerText).join(" ").trim()
+                            : (row.innerText || "").trim();
+                        if (text) results.push({ meta: meta || "", text: text });
                     }
-                )
+                    return results;
+                }""",
+                self.max_messages_visible,
+            )
 
             context.close()
 
+        data: list[dict[str, Any]] = []
+        for item in raw_items:
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue
+            author, timestamp = extract_author_and_timestamp(item.get("meta") or "")
+            external_seed = f"{author}|{timestamp.isoformat()}|{text}"
+            external_id = f"pw-{hashlib.sha1(external_seed.encode('utf-8')).hexdigest()[:16]}"
+            data.append(
+                {
+                    "author": author,
+                    "timestamp": timestamp.isoformat(),
+                    "text": text,
+                    "external_id": external_id,
+                }
+            )
+
         if not data and since_timestamp is None:
             raise RuntimeError(
-                "Grupo aberto, mas nenhuma mensagem foi extraída. O DOM do WhatsApp pode ter mudado; ajuste seletores --wa-* ou rode novamente com o chat já visível."
+                "Grupo aberto, mas nenhuma mensagem foi extraída. O DOM do WhatsApp pode ter "
+                "mudado; rode novamente com o chat já visível ou reporte os seletores."
             )
 
         return _filter_since(data, since_timestamp)
 
     def _open_group(self, page: Any, group_name: str) -> None:
+        # Aguarda o WhatsApp carregar (QR ou chat list)
         page.wait_for_timeout(4000)
 
         search_box = page.locator(self.group_search_selector).first
@@ -189,18 +207,29 @@ class PlaywrightWhatsAppCollector(MessageCollector):
         else:
             page.get_by_text(group_name, exact=False).first.click(timeout=10000)
 
-        page.wait_for_timeout(1800)
-
-        chat_container = page.locator("div[role='application']").first
-        if chat_container.count() > 0:
-            chat_container.hover()
-            page.mouse.wheel(0, 2000)
-            page.wait_for_timeout(700)
-            page.mouse.wheel(0, -400)
+        # Aguarda o painel de mensagens aparecer
+        page.wait_for_timeout(2500)
 
         header = page.locator("header span[title]").first
         if header.count() == 0:
             raise RuntimeError("Não foi possível abrir o grupo no WhatsApp Web.")
+
+        # Rola para cima para carregar mensagens mais antigas dentro do limite visível
+        chat_container = page.locator("div[role='application']").first
+        if chat_container.count() > 0:
+            chat_container.hover()
+            for _ in range(5):
+                page.mouse.wheel(0, -3000)
+                page.wait_for_timeout(600)
+            # Volta ao final para garantir que as mensagens recentes estão visíveis
+            page.mouse.wheel(0, 15000)
+            page.wait_for_timeout(1000)
+
+        # Aguarda pelo menos uma linha de mensagem estar presente
+        try:
+            page.locator("div[role='row']").first.wait_for(timeout=8000)
+        except Exception:
+            pass  # continua mesmo sem linhas – aviso será dado pelo chamador
 
 
 def extract_author_and_timestamp(meta_text: str) -> tuple[str, datetime]:
