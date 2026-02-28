@@ -351,37 +351,52 @@ class LegalCasePipeline:
         self,
         progress_cb: Callable[[int, int, str, str], None] | None = None,
     ) -> list[CaseResult]:
-        """Processa todos os casos de Gestão Jurídico. Retorna resultado por caso."""
+        """Processa todos os casos de Gestão Jurídico. Retorna resultado por caso.
+
+        O browser do WhatsApp é aberto UMA única vez para todos os casos, evitando
+        o erro "Sync API inside asyncio loop" que ocorre ao reabrir Playwright no
+        mesmo thread após o primeiro contexto ter sido fechado.
+        """
+        from .collector import PlaywrightWhatsAppCollector
+
         cases = self.tamaras.get_gestao_juridico_cases()
         results: list[CaseResult] = []
 
-        for idx, case in enumerate(cases):
-            case_id = case.get("id", f"caso-{idx}")
-            addr = case.get("property_address", case_id)
-            logger.info("═══ Processando %s (%d/%d) ═══", case_id, idx + 1, len(cases))
+        # Abre o WhatsApp Web uma única vez para toda a sessão de processamento
+        with PlaywrightWhatsAppCollector(
+            profile_dir=self.wa_profile_dir,
+            headless=self.wa_headless,
+            max_messages_visible=self.wa_max_messages,
+        ) as collector:
+            for idx, case in enumerate(cases):
+                case_id = case.get("id", f"caso-{idx}")
+                addr = case.get("property_address", case_id)
+                logger.info("═══ Processando %s (%d/%d) ═══", case_id, idx + 1, len(cases))
 
-            if progress_cb:
-                progress_cb(idx, len(cases), case_id, "iniciando")
+                if progress_cb:
+                    progress_cb(idx, len(cases), case_id, "iniciando")
 
-            result = CaseResult(case_id=case_id, property_address=addr)
-            try:
-                result = self._process_case(
-                    case,
-                    cb=lambda step, _id=case_id, _i=idx, _n=len(cases): (
-                        progress_cb(_i, _n, _id, step) if progress_cb else None
-                    ),
-                )
-            except Exception as exc:
-                logger.exception("Erro inesperado no caso %s.", case_id)
-                result.error = str(exc)
+                result = CaseResult(case_id=case_id, property_address=addr)
+                try:
+                    result = self._process_case(
+                        case,
+                        collector=collector,
+                        cb=lambda step, _id=case_id, _i=idx, _n=len(cases): (
+                            progress_cb(_i, _n, _id, step) if progress_cb else None
+                        ),
+                    )
+                except Exception as exc:
+                    logger.exception("Erro inesperado no caso %s.", case_id)
+                    result.error = str(exc)
 
-            results.append(result)
+                results.append(result)
 
         return results
 
     def _process_case(
         self,
         case: dict,
+        collector: Any,
         cb: Callable[[str], None] | None = None,
     ) -> CaseResult:
         case_id = case["id"]
@@ -407,58 +422,50 @@ class LegalCasePipeline:
             "  Endereço: %s | Nomes: %s", addr_terms, name_terms
         )
 
-        # ── 3. Coletar mensagens (browser aberto UMA vez para este caso) ──────
-        _cb("abrindo WhatsApp")
-
-        from .collector import PlaywrightWhatsAppCollector
+        # ── 3. Coletar mensagens (reusa o browser já aberto pelo run()) ─────────
+        _cb("buscando grupo no WhatsApp")
 
         all_messages: list[dict] = []
 
-        with PlaywrightWhatsAppCollector(
-            profile_dir=self.wa_profile_dir,
-            headless=self.wa_headless,
-            max_messages_visible=self.wa_max_messages,
-        ) as collector:
-            # ── Grupo principal (vendedor / genérico) ─────────────────────────
-            _cb("buscando grupo do vendedor/imóvel")
-            msgs, group_found = _collect_group(
-                collector,
-                addr_terms=addr_terms,
-                name_terms=name_terms,
-                case=case,
-                label="vendedor",
+        # ── Grupo principal (vendedor / genérico) ─────────────────────────────
+        _cb("buscando grupo do vendedor/imóvel")
+        msgs, group_found = _collect_group(
+            collector,
+            addr_terms=addr_terms,
+            name_terms=name_terms,
+            case=case,
+            label="vendedor",
+        )
+
+        if not group_found:
+            result.skipped = True
+            result.skip_reason = (
+                f"Grupo não localizado no WhatsApp. "
+                f"Termos tentados: {(addr_terms + name_terms)[:6]}"
             )
+            logger.warning("  Caso %s pulado: %s", case_id, result.skip_reason)
+            return result
 
-            if not group_found:
-                # Grupo não existe no WhatsApp com nenhum dos termos
-                result.skipped = True
-                result.skip_reason = (
-                    f"Grupo não localizado no WhatsApp. "
-                    f"Termos tentados: {(addr_terms + name_terms)[:6]}"
-                )
-                logger.warning("  Caso %s pulado: %s", case_id, result.skip_reason)
-                return result
+        result.groups_found.append(group_found)
+        all_messages.extend(msgs)
+        _cb(f"grupo '{group_found}' ({len(msgs)} msgs)")
 
-            result.groups_found.append(group_found)
-            all_messages.extend(msgs)
-            _cb(f"grupo '{group_found}' ({len(msgs)} msgs)")
-
-            # ── Grupo do comprador ────────────────────────────────────────────
-            _cb("buscando grupo do comprador")
-            buyer_addr_terms = [f"{t} comprador" for t in addr_terms[:2]] + [
-                f"{t} (comprador)" for t in addr_terms[:2]
-            ]
-            buyer_msgs, buyer_group = _collect_group(
-                collector,
-                addr_terms=buyer_addr_terms,
-                name_terms=None,   # não busca comprador por nome de parte
-                case=case,
-                label="comprador",
-            )
-            if buyer_msgs and buyer_group and buyer_group != group_found:
-                _cb(f"grupo comprador '{buyer_group}' ({len(buyer_msgs)} msgs)")
-                result.groups_found.append(buyer_group)
-                all_messages.extend(buyer_msgs)
+        # ── Grupo do comprador ────────────────────────────────────────────────
+        _cb("buscando grupo do comprador")
+        buyer_addr_terms = [f"{t} comprador" for t in addr_terms[:2]] + [
+            f"{t} (comprador)" for t in addr_terms[:2]
+        ]
+        buyer_msgs, buyer_group = _collect_group(
+            collector,
+            addr_terms=buyer_addr_terms,
+            name_terms=None,   # não busca comprador por nome de parte
+            case=case,
+            label="comprador",
+        )
+        if buyer_msgs and buyer_group and buyer_group != group_found:
+            _cb(f"grupo comprador '{buyer_group}' ({len(buyer_msgs)} msgs)")
+            result.groups_found.append(buyer_group)
+            all_messages.extend(buyer_msgs)
 
         result.message_count = len(all_messages)
         _cb(
