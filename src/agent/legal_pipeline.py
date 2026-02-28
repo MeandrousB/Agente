@@ -99,59 +99,19 @@ class CaseResult:
 
 # ── Construção dos termos de busca ────────────────────────────────────────────
 
-def _build_search_terms(case: dict) -> tuple[list[str], list[str]]:
-    """Retorna (termos_de_endereço, termos_de_nome_de_parte).
+def _build_search_terms(
+    case: dict,
+) -> tuple[list[str], list[str], list[str]]:
+    """Retorna (addr_terms, seller_name_terms, buyer_name_terms).
 
-    Os termos de endereço têm prioridade: só se recorre aos nomes das partes
-    quando NENHUM termo de endereço localizar o grupo.
+    addr_terms          — variações do endereço, usadas como primeiro recurso
+                          para ambos os grupos (vendedor e comprador).
+    seller_name_terms   — nomes das partes vendedoras, fallback se addr falhar.
+    buyer_name_terms    — nomes das partes compradoras, fallback para grupo do
+                          comprador.
     """
     addr: str = case.get("property_address") or ""
     parties: list[dict] = case.get("parties") or []
-
-    addr_terms: list[str] = []
-
-    # 1. Rua + número (ex.: "Bartira 901", "Augusta 1122")
-    m = re.match(
-        r"(?:Rua|Av\.?|Avenida|Alameda|R\.)\s+([A-Za-zÀ-ú\s]+?),?\s*(\d+)",
-        addr,
-        re.IGNORECASE,
-    )
-    if m:
-        street = m.group(1).strip()
-        number = m.group(2).strip()
-        addr_terms.append(f"{street} {number}")  # "Bartira 901"
-        addr_terms.append(street)                 # "Bartira"
-    else:
-        words = addr.split()
-        if len(words) >= 2:
-            addr_terms.append(" ".join(words[:2]))
-        if words:
-            addr_terms.append(words[0])
-
-    # 2. Apelido após vírgula no endereço (ex.: "Ana", "KUMPERA")
-    parts = [p.strip() for p in addr.split(",")]
-    if len(parts) >= 2:
-        nickname = parts[-1].strip().strip("()")
-        if nickname and not nickname.isdigit() and nickname not in addr_terms:
-            addr_terms.append(nickname)
-
-    # 3. Endereço completo como último recurso de endereço
-    full_addr = addr.split(",")[0].strip()
-    if full_addr and full_addr not in addr_terms:
-        addr_terms.append(full_addr)
-
-    # Termos de nome de parte — APENAS se endereço falhar
-    name_terms: list[str] = []
-    for p in parties:
-        full = (p.get("name") or "").strip()
-        if not full:
-            continue
-        tokens = full.split()
-        first = tokens[0]
-        last = tokens[-1] if len(tokens) > 1 else ""
-        for token in (first, last):
-            if token and len(token) > 2 and token not in name_terms and token not in addr_terms:
-                name_terms.append(token)
 
     def _dedup(lst: list[str]) -> list[str]:
         seen: set[str] = set()
@@ -163,7 +123,65 @@ def _build_search_terms(case: dict) -> tuple[list[str], list[str]]:
                 out.append(t)
         return out
 
-    return _dedup(addr_terms), _dedup(name_terms)
+    # ── Termos de endereço ────────────────────────────────────────────────────
+    addr_terms: list[str] = []
+
+    m = re.match(
+        r"(?:Rua|Av\.?|Avenida|Alameda|R\.)\s+([A-Za-zÀ-ú\s]+?),?\s*(\d+)",
+        addr,
+        re.IGNORECASE,
+    )
+    if m:
+        street = m.group(1).strip()
+        number = m.group(2).strip()
+        addr_terms.append(f"{street} {number}")   # "Bartira 901"
+        addr_terms.append(street)                  # "Bartira"
+    else:
+        words = addr.split()
+        if len(words) >= 2:
+            addr_terms.append(" ".join(words[:2]))
+        if words:
+            addr_terms.append(words[0])
+
+    # Apelido após vírgula no endereço (ex.: "Ana", "KUMPERA")
+    addr_parts = [p.strip() for p in addr.split(",")]
+    if len(addr_parts) >= 2:
+        nickname = addr_parts[-1].strip().strip("()")
+        if nickname and not nickname.isdigit() and nickname not in addr_terms:
+            addr_terms.append(nickname)
+
+    full_addr = addr.split(",")[0].strip()
+    if full_addr and full_addr not in addr_terms:
+        addr_terms.append(full_addr)
+
+    # ── Nomes por lado (vendedor / comprador) ─────────────────────────────────
+    _BUYER_TYPES  = {"comprador", "compradora", "buyer"}
+    _SELLER_TYPES = {"vendedor", "vendedora", "seller"}
+
+    seller_name_terms: list[str] = []
+    buyer_name_terms:  list[str] = []
+
+    for p in parties:
+        full = (p.get("name") or "").strip()
+        if not full:
+            continue
+        ptype = (p.get("party_type") or "").strip().lower()
+        tokens = full.split()
+        first = tokens[0] if tokens else ""
+        last  = tokens[-1] if len(tokens) > 1 else ""
+        names = [t for t in (first, last) if t and len(t) > 2 and t.lower() not in {a.lower() for a in addr_terms}]
+
+        if ptype in _BUYER_TYPES:
+            for n in names:
+                if n not in buyer_name_terms:
+                    buyer_name_terms.append(n)
+        else:
+            # vendedor ou tipo desconhecido → lado do vendedor
+            for n in names:
+                if n not in seller_name_terms:
+                    seller_name_terms.append(n)
+
+    return _dedup(addr_terms), _dedup(seller_name_terms), _dedup(buyer_name_terms)
 
 
 # ── Validação de relevância ───────────────────────────────────────────────────
@@ -415,24 +433,23 @@ class LegalCasePipeline:
         if comments and isinstance(comments[0], dict):
             last_comment = comments[0].get("comment") or ""
 
-        # ── 2. Termos de busca (endereço e nomes separados) ───────────────────
-        addr_terms, name_terms = _build_search_terms(case)
-        result.groups_searched = addr_terms + name_terms
+        # ── 2. Termos de busca separados por lado ─────────────────────────────
+        addr_terms, seller_name_terms, buyer_name_terms = _build_search_terms(case)
+        result.groups_searched = addr_terms + seller_name_terms + buyer_name_terms
         logger.info(
-            "  Endereço: %s | Nomes: %s", addr_terms, name_terms
+            "  Endereço: %s | Vendedor nomes: %s | Comprador nomes: %s",
+            addr_terms, seller_name_terms, buyer_name_terms,
         )
 
-        # ── 3. Coletar mensagens (reusa o browser já aberto pelo run()) ─────────
-        _cb("buscando grupo no WhatsApp")
-
+        # ── 3. Coletar mensagens (reusa o browser já aberto pelo run()) ────────
         all_messages: list[dict] = []
 
-        # ── Grupo principal (vendedor / genérico) ─────────────────────────────
-        _cb("buscando grupo do vendedor/imóvel")
+        # ── Grupo do vendedor ─────────────────────────────────────────────────
+        _cb("buscando grupo do vendedor")
         msgs, group_found = _collect_group(
             collector,
             addr_terms=addr_terms,
-            name_terms=name_terms,
+            name_terms=seller_name_terms,
             case=case,
             label="vendedor",
         )
@@ -441,24 +458,41 @@ class LegalCasePipeline:
             result.skipped = True
             result.skip_reason = (
                 f"Grupo não localizado no WhatsApp. "
-                f"Termos tentados: {(addr_terms + name_terms)[:6]}"
+                f"Termos tentados: {(addr_terms + seller_name_terms)[:6]}"
             )
             logger.warning("  Caso %s pulado: %s", case_id, result.skip_reason)
             return result
 
         result.groups_found.append(group_found)
         all_messages.extend(msgs)
-        _cb(f"grupo '{group_found}' ({len(msgs)} msgs)")
+        _cb(f"grupo vendedor '{group_found}' ({len(msgs)} msgs)")
 
         # ── Grupo do comprador ────────────────────────────────────────────────
+        # Constrói variações comuns de nomenclatura para o grupo do comprador:
+        # sufixos "comprador", "C", "- C", "(comprador)" combinados com o
+        # endereço; e nomes próprios dos compradores como último recurso.
         _cb("buscando grupo do comprador")
-        buyer_addr_terms = [f"{t} comprador" for t in addr_terms[:2]] + [
-            f"{t} (comprador)" for t in addr_terms[:2]
-        ]
+        buyer_addr_terms: list[str] = []
+        for t in addr_terms[:2]:
+            buyer_addr_terms.extend([
+                f"{t} comprador",
+                f"{t} (comprador)",
+                f"{t} - comprador",
+                f"{t} - C",
+                f"{t} C",
+            ])
+        # Nomes dos compradores combinados com o principal termo de endereço
+        if addr_terms:
+            base = addr_terms[0]
+            for n in buyer_name_terms[:2]:
+                buyer_addr_terms.append(f"{base} {n}")
+        # Nomes dos compradores sozinhos (fallback validado por _is_relevant_to_case)
+        buyer_name_fallback = buyer_name_terms
+
         buyer_msgs, buyer_group = _collect_group(
             collector,
             addr_terms=buyer_addr_terms,
-            name_terms=None,   # não busca comprador por nome de parte
+            name_terms=buyer_name_fallback,
             case=case,
             label="comprador",
         )
@@ -466,6 +500,8 @@ class LegalCasePipeline:
             _cb(f"grupo comprador '{buyer_group}' ({len(buyer_msgs)} msgs)")
             result.groups_found.append(buyer_group)
             all_messages.extend(buyer_msgs)
+        elif not buyer_group:
+            _cb("grupo do comprador não encontrado — continuando só com vendedor")
 
         result.message_count = len(all_messages)
         _cb(
