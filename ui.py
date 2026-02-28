@@ -44,6 +44,17 @@ with st.sidebar:
     tamaras_profile_dir = st.text_input("Perfil Tamaras", value=".tamaras_profile",
         help="Perfil Chromium para o JuridicoTamaras (deve estar logado).")
 
+    _profile_path = Path(tamaras_profile_dir)
+    _profile_ok = _profile_path.exists() and any(_profile_path.iterdir())
+    st.caption("✅ Perfil salvo" if _profile_ok else "⚠️ Perfil ainda não criado")
+
+    login_tamaras_btn = st.button(
+        "🔐 Fazer Login no Tamaras",
+        use_container_width=True,
+        help="Abre o browser para você fazer login em juridicotamaras.com.br. "
+             "O login fica salvo no perfil para uso futuro.",
+    )
+
     st.divider()
 
     st.header("💾 Banco de dados")
@@ -64,6 +75,79 @@ with st.sidebar:
 def _fix_event_loop() -> None:
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+
+# ──────────────────────────────────────────────
+# Login Tamaras — abre browser e aguarda autenticação
+# ──────────────────────────────────────────────
+_LS_KEY = "sb-rfimhkckozzyzszxxrfz-auth-token"
+_TAMARAS_URL = "https://juridicotamaras.com.br"
+_LOGIN_TIMEOUT_S = 300  # 5 minutos
+
+
+def _run_tamaras_login(profile_dir: str) -> str:
+    """Abre o browser para login no Tamaras e detecta conclusão via localStorage.
+
+    Retorna:
+        "ok"       — token detectado, login bem-sucedido
+        "timeout"  — 5 min sem autenticação
+        "error:…"  — mensagem de exceção
+    """
+    import json
+    import time
+
+    _fix_event_loop()
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "error:Playwright não instalado."
+
+    profile = Path(profile_dir)
+    profile.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir=str(profile),
+                headless=False,
+                args=["--start-maximized"],
+            )
+            page = ctx.new_page()
+            page.goto(_TAMARAS_URL, wait_until="domcontentloaded")
+
+            deadline = time.time() + _LOGIN_TIMEOUT_S
+            while time.time() < deadline:
+                try:
+                    raw = page.evaluate(f"localStorage.getItem('{_LS_KEY}')")
+                    if raw:
+                        data = json.loads(raw)
+                        if data.get("access_token"):
+                            # Login confirmado — fecha o browser
+                            ctx.close()
+                            return "ok"
+                except Exception:
+                    pass
+                time.sleep(2)
+
+            ctx.close()
+            return "timeout"
+    except Exception as exc:
+        return f"error:{exc}"
+
+
+# Login Tamaras — executado quando o botão é clicado
+if login_tamaras_btn:
+    _sidebar_status = st.sidebar.empty()
+    _sidebar_status.info("🔐 Browser aberto — faça login em juridicotamaras.com.br…")
+    with ThreadPoolExecutor(max_workers=1) as _ex:
+        _login_future = _ex.submit(_run_tamaras_login, tamaras_profile_dir)
+        _result = _login_future.result(timeout=_LOGIN_TIMEOUT_S + 30)
+    if _result == "ok":
+        _sidebar_status.success("✅ Login no Tamaras realizado com sucesso!")
+    elif _result == "timeout":
+        _sidebar_status.warning("⏱ Tempo esgotado. Faça login em até 5 minutos e tente novamente.")
+    else:
+        _sidebar_status.error(f"Erro ao fazer login: {_result.removeprefix('error:')}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
