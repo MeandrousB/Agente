@@ -6,8 +6,8 @@ Pipeline completo: Gestão Jurídico → WhatsApp → LLM → Timeline.
 Fluxo por caso:
   1. Busca caso no JuridicoTamaras (via TamarasClient)
   2. Lê último comentário da timeline (para evitar redundância)
-  3. Tenta localizar o(s) grupo(s) de WhatsApp (até 4 variações)
-  4. Coleta mensagens (rola para cima para captar contexto)
+  3. Abre o browser UMA vez e busca o grupo de vendedores e compradores
+  4. Coleta mensagens de ambos os grupos (contexto das últimas trocas)
   5. Gera comentário estruturado com LLM (Ollama)
   6. Posta na timeline e verifica
 """
@@ -42,7 +42,7 @@ PARTES DO CASO:
 {last_comment}
 ---
 
-MENSAGENS DOS GRUPOS DE WHATSAPP ({msg_count} mensagens):
+MENSAGENS DOS GRUPOS DE WHATSAPP ({msg_count} mensagens de {group_count} grupo(s)):
 {messages_text}
 
 Gere um comentário para a timeline seguindo EXATAMENTE este template,
@@ -97,14 +97,18 @@ class CaseResult:
         return "⚠ Incompleto"
 
 
-# ── Helpers de busca ──────────────────────────────────────────────────────────
+# ── Construção dos termos de busca ────────────────────────────────────────────
 
-def _build_search_terms(case: dict) -> list[str]:
-    """Gera termos de busca ordenados por especificidade para localizar o grupo."""
+def _build_search_terms(case: dict) -> tuple[list[str], list[str]]:
+    """Retorna (termos_de_endereço, termos_de_nome_de_parte).
+
+    Os termos de endereço têm prioridade: só se recorre aos nomes das partes
+    quando NENHUM termo de endereço localizar o grupo.
+    """
     addr: str = case.get("property_address") or ""
     parties: list[dict] = case.get("parties") or []
 
-    terms: list[str] = []
+    addr_terms: list[str] = []
 
     # 1. Rua + número (ex.: "Bartira 901", "Augusta 1122")
     m = re.match(
@@ -115,71 +119,153 @@ def _build_search_terms(case: dict) -> list[str]:
     if m:
         street = m.group(1).strip()
         number = m.group(2).strip()
-        terms.append(f"{street} {number}")  # "Bartira 901"
-        terms.append(street)                # "Bartira"
+        addr_terms.append(f"{street} {number}")  # "Bartira 901"
+        addr_terms.append(street)                 # "Bartira"
     else:
-        # Fallback genérico: primeiras 2 palavras
         words = addr.split()
         if len(words) >= 2:
-            terms.append(" ".join(words[:2]))
+            addr_terms.append(" ".join(words[:2]))
         if words:
-            terms.append(words[0])
+            addr_terms.append(words[0])
 
-    # 2. Apelido do cliente (último token após vírgula, ex.: "Ana", "KUMPERA")
+    # 2. Apelido após vírgula no endereço (ex.: "Ana", "KUMPERA")
     parts = [p.strip() for p in addr.split(",")]
     if len(parts) >= 2:
         nickname = parts[-1].strip().strip("()")
-        if nickname and not nickname.isdigit():
-            terms.append(nickname)
+        if nickname and not nickname.isdigit() and nickname not in addr_terms:
+            addr_terms.append(nickname)
 
-    # 3. Primeiro nome de cada parte (vendedor e comprador)
+    # 3. Endereço completo como último recurso de endereço
+    full_addr = addr.split(",")[0].strip()
+    if full_addr and full_addr not in addr_terms:
+        addr_terms.append(full_addr)
+
+    # Termos de nome de parte — APENAS se endereço falhar
+    name_terms: list[str] = []
     for p in parties:
         full = (p.get("name") or "").strip()
         if not full:
             continue
-        first = full.split()[0]
-        last = full.split()[-1] if len(full.split()) > 1 else ""
+        tokens = full.split()
+        first = tokens[0]
+        last = tokens[-1] if len(tokens) > 1 else ""
         for token in (first, last):
-            if token and token not in terms:
-                terms.append(token)
+            if token and len(token) > 2 and token not in name_terms and token not in addr_terms:
+                name_terms.append(token)
 
-    # 4. Endereço completo como último recurso
-    full_addr = addr.split(",")[0].strip()
-    if full_addr not in terms:
-        terms.append(full_addr)
+    def _dedup(lst: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for t in lst:
+            key = t.lower()
+            if t and key not in seen:
+                seen.add(key)
+                out.append(t)
+        return out
 
-    # Deduplicar preservando ordem, ignorar case
-    seen: set[str] = set()
-    unique: list[str] = []
-    for t in terms:
-        key = t.lower()
-        if t and key not in seen:
-            seen.add(key)
-            unique.append(t)
-    return unique
+    return _dedup(addr_terms), _dedup(name_terms)
 
+
+# ── Validação de relevância ───────────────────────────────────────────────────
+
+def _is_relevant_to_case(messages: list[dict], case: dict) -> bool:
+    """Verifica se as mensagens parecem ser sobre este caso específico.
+
+    Usado para validar grupos encontrados por nome de parte (evitar alimentar
+    o LLM com contexto de um caso diferente).
+    """
+    if not messages:
+        return False
+
+    addr = (case.get("property_address") or "").lower()
+    # Palavras significativas do endereço (ignora preposições e números curtos)
+    key_words = [
+        w for w in re.findall(r"[a-záàâãéêíóôõúç]+", addr, re.IGNORECASE)
+        if len(w) > 4
+    ]
+
+    all_text = " ".join((m.get("text") or "").lower() for m in messages[:40])
+
+    if any(word in all_text for word in key_words[:3]):
+        return True
+
+    case_id = (case.get("id") or "").lower()
+    if case_id and case_id in all_text:
+        return True
+
+    return False
+
+
+# ── Coleta de grupo ───────────────────────────────────────────────────────────
 
 def _collect_group(
     collector: Any,
-    search_terms: list[str],
-    max_attempts: int = 4,
+    addr_terms: list[str],
+    name_terms: list[str] | None = None,
+    case: dict | None = None,
+    label: str = "grupo",
 ) -> tuple[list[dict], str]:
-    """Tenta até max_attempts termos; retorna (mensagens, nome_do_grupo)."""
-    for term in search_terms[:max_attempts]:
+    """Localiza e coleta mensagens de um grupo WhatsApp.
+
+    Estratégia:
+      1. Tenta cada termo de endereço. Na primeira abertura bem-sucedida,
+         para imediatamente (mesmo que vazio) — evita buscar pelo nome de
+         parte quando o endereço já identificou o grupo correto.
+      2. Só tenta nomes de partes se TODOS os termos de endereço falharem
+         (i.e., grupo não encontrado no WhatsApp).
+      3. Correspondências por nome de parte são validadas contra o endereço
+         do caso para evitar alimentar o LLM com contexto errado.
+
+    Retorna:
+      (mensagens, nome_do_termo_que_abriu_o_grupo)
+      Se o grupo não for encontrado: ([], "")
+    """
+    # Fase 1: termos de endereço
+    for term in addr_terms:
         try:
-            logger.info("  Buscando grupo WhatsApp: '%s'", term)
+            logger.info("  [%s] Buscando por endereço: '%s'", label, term)
+            msgs = collector.collect_messages(group_name=term)
+            # Grupo identificado pelo endereço — usa mesmo que vazio
+            logger.info(
+                "  [%s] ✓ Grupo '%s' aberto (%d mensagens)", label, term, len(msgs)
+            )
+            return msgs, term
+        except RuntimeError as exc:
+            err = str(exc).lower()
+            if "não encontrado" in err or "nenhum resultado" in err:
+                logger.debug("  [%s] '%s': não encontrado, tentando próximo", label, term)
+            else:
+                logger.debug("  [%s] '%s': erro — %s", label, term, exc)
+        except Exception as exc:
+            logger.debug("  [%s] '%s': erro — %s", label, term, exc)
+
+    if not name_terms:
+        return [], ""
+
+    # Fase 2: termos de nome (só se endereço falhou)
+    logger.info("  [%s] Endereço não localizou grupo; tentando nomes de partes.", label)
+    for term in name_terms:
+        try:
+            logger.info("  [%s] Buscando por nome: '%s'", label, term)
             msgs = collector.collect_messages(group_name=term)
             if msgs:
-                logger.info("  ✓ Grupo encontrado: '%s' (%d mensagens)", term, len(msgs))
+                if case and not _is_relevant_to_case(msgs, case):
+                    logger.warning(
+                        "  [%s] Grupo '%s' encontrado por nome, mas contexto não "
+                        "parece relacionado ao caso — descartado.",
+                        label,
+                        term,
+                    )
+                    continue
+                logger.info("  [%s] ✓ Grupo '%s' por nome (%d msgs)", label, term, len(msgs))
                 return msgs, term
         except RuntimeError as exc:
-            # "Nenhuma mensagem" não é erro fatal — grupo errado
-            if "nenhuma mensagem" in str(exc).lower():
-                logger.debug("  Grupo '%s' aberto mas vazio; tentando próximo.", term)
-            else:
-                logger.debug("  Termo '%s' falhou: %s", term, exc)
+            if "não encontrado" in str(exc).lower():
+                continue
+            logger.debug("  [%s] '%s': erro — %s", label, term, exc)
         except Exception as exc:
-            logger.debug("  Termo '%s' falhou: %s", term, exc)
+            logger.debug("  [%s] '%s': erro — %s", label, term, exc)
+
     return [], ""
 
 
@@ -188,6 +274,7 @@ def _collect_group(
 def _generate_comment(
     case: dict,
     messages: list[dict],
+    groups_found: list[str],
     last_comment: str,
     model: str,
     ollama_url: str,
@@ -204,7 +291,7 @@ def _generate_comment(
         author = msg.get("author") or "?"
         text = msg.get("text") or ""
         lines.append(f"[{ts}] {author}: {text}")
-    messages_text = "\n".join(lines) if lines else "(nenhuma mensagem coletada)"
+    messages_text = "\n".join(lines) if lines else "(nenhuma mensagem coletada nos grupos)"
 
     prompt = _USER_PROMPT_TEMPLATE.format(
         case_id=case.get("id", ""),
@@ -212,6 +299,7 @@ def _generate_comment(
         parties=parties_text,
         last_comment=last_comment.strip() if last_comment else "(nenhum comentário anterior)",
         msg_count=len(messages),
+        group_count=len(groups_found),
         messages_text=messages_text,
     )
 
@@ -236,7 +324,7 @@ class LegalCasePipeline:
     """
     Orquestra o processamento de todos os casos de Gestão Jurídico:
       - Coleta dados do JuridicoTamaras
-      - Busca grupos de WhatsApp (vendedor + comprador)
+      - Busca grupos de WhatsApp (vendedor + comprador) em sessão única por caso
       - Gera comentário estruturado via LLM
       - Posta na timeline e valida
     """
@@ -312,57 +400,78 @@ class LegalCasePipeline:
         if comments and isinstance(comments[0], dict):
             last_comment = comments[0].get("comment") or ""
 
-        # ── 2. Termos de busca para o WhatsApp ───────────────────────────────
-        search_terms = _build_search_terms(case)
-        result.groups_searched = search_terms[:4]
-        logger.info("  Termos de busca: %s", search_terms[:4])
-
-        # ── 3. Coletar mensagens do WhatsApp ──────────────────────────────────
-        _cb("buscando grupo no WhatsApp")
-
-        # Import aqui para evitar import circular e isolar o loop asyncio
-        from .collector import PlaywrightWhatsAppCollector
-
-        collector = PlaywrightWhatsAppCollector(
-            profile_dir=self.wa_profile_dir,
-            headless=self.wa_headless,
-            max_messages_visible=self.wa_max_messages,
+        # ── 2. Termos de busca (endereço e nomes separados) ───────────────────
+        addr_terms, name_terms = _build_search_terms(case)
+        result.groups_searched = addr_terms + name_terms
+        logger.info(
+            "  Endereço: %s | Nomes: %s", addr_terms, name_terms
         )
+
+        # ── 3. Coletar mensagens (browser aberto UMA vez para este caso) ──────
+        _cb("abrindo WhatsApp")
+
+        from .collector import PlaywrightWhatsAppCollector
 
         all_messages: list[dict] = []
 
-        # Busca pelo grupo principal (vendedor ou genérico)
-        msgs, group_found = _collect_group(collector, search_terms, max_attempts=4)
-        if not msgs:
-            result.skipped = True
-            result.skip_reason = (
-                f"Grupo não encontrado após 4 tentativas. "
-                f"Termos usados: {search_terms[:4]}"
+        with PlaywrightWhatsAppCollector(
+            profile_dir=self.wa_profile_dir,
+            headless=self.wa_headless,
+            max_messages_visible=self.wa_max_messages,
+        ) as collector:
+            # ── Grupo principal (vendedor / genérico) ─────────────────────────
+            _cb("buscando grupo do vendedor/imóvel")
+            msgs, group_found = _collect_group(
+                collector,
+                addr_terms=addr_terms,
+                name_terms=name_terms,
+                case=case,
+                label="vendedor",
             )
-            logger.warning("  Caso %s pulado: %s", case_id, result.skip_reason)
-            return result
 
-        result.groups_found.append(group_found)
-        all_messages.extend(msgs)
+            if not group_found:
+                # Grupo não existe no WhatsApp com nenhum dos termos
+                result.skipped = True
+                result.skip_reason = (
+                    f"Grupo não localizado no WhatsApp. "
+                    f"Termos tentados: {(addr_terms + name_terms)[:6]}"
+                )
+                logger.warning("  Caso %s pulado: %s", case_id, result.skip_reason)
+                return result
 
-        # Tenta também buscar grupo do comprador (sufixo "(comprador)" / "comprador")
-        buyer_terms = [f"{t} comprador" for t in search_terms[:2]] + [
-            f"{t} (comprador)" for t in search_terms[:2]
-        ]
-        buyer_msgs, buyer_group = _collect_group(collector, buyer_terms, max_attempts=4)
-        if buyer_msgs and buyer_group != group_found:
-            _cb(f"grupo do comprador encontrado: {buyer_group}")
-            result.groups_found.append(buyer_group)
-            all_messages.extend(buyer_msgs)
+            result.groups_found.append(group_found)
+            all_messages.extend(msgs)
+            _cb(f"grupo '{group_found}' ({len(msgs)} msgs)")
+
+            # ── Grupo do comprador ────────────────────────────────────────────
+            _cb("buscando grupo do comprador")
+            buyer_addr_terms = [f"{t} comprador" for t in addr_terms[:2]] + [
+                f"{t} (comprador)" for t in addr_terms[:2]
+            ]
+            buyer_msgs, buyer_group = _collect_group(
+                collector,
+                addr_terms=buyer_addr_terms,
+                name_terms=None,   # não busca comprador por nome de parte
+                case=case,
+                label="comprador",
+            )
+            if buyer_msgs and buyer_group and buyer_group != group_found:
+                _cb(f"grupo comprador '{buyer_group}' ({len(buyer_msgs)} msgs)")
+                result.groups_found.append(buyer_group)
+                all_messages.extend(buyer_msgs)
 
         result.message_count = len(all_messages)
-        _cb(f"{result.message_count} mensagem(ns) coletada(s) de {len(result.groups_found)} grupo(s)")
+        _cb(
+            f"{result.message_count} mensagem(ns) de {len(result.groups_found)} grupo(s): "
+            f"{result.groups_found}"
+        )
 
         # ── 4. Gerar comentário com LLM ───────────────────────────────────────
         _cb("gerando comentário com LLM")
         generated = _generate_comment(
             case=case,
             messages=all_messages,
+            groups_found=result.groups_found,
             last_comment=last_comment,
             model=self.ollama_model,
             ollama_url=self.ollama_url,
